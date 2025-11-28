@@ -24,14 +24,41 @@ def main():
         # Get new data
         records = get_24h_statement()
         if records:
+            records = sorted(records, key=lambda r: r["transactionDateTime"])
+            for curr, nxt in zip(records, records[1:]):
+                if abs(curr["balance"] - nxt["balance"]) not in (abs(curr["amount"]), abs(nxt["amount"])):
+                    send_email_alert(
+                        f"❌ Transaction {curr.get('transactionId')}",
+                        f"🚨 This transaction doesn't change the balance properly"
+                    )
+
+            # for index in range(len(records)-1):
+            #     if abs(records[index].get("balance") - records[index+1].get("balance")) != abs(records[index].get("amount")) or abs(records[index].get("balance") - records[index+1].get("balance")) != abs(records[index+1].get("amount")):
+            #         send_email_alert(f"❌ transaction {records[index].get('transactionId')}", f"🚨 this transaction doesn't change the balance")
             credit_records = [
-                (r.get("additionalData2"), r.get("amount"))
+                (r.get("additionalData2"), r.get("amount"), r.get("balance"))
                 for r in records
                 if r.get("creditDebit") == "CREDIT"
             ]
-            send_email_alert("✅ CREDIT", f"🚨 Found successful transactions: {credit_records}")
-            with open(day_file_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            debit_commission_records = [
+                r.get("amount")
+                for r in records
+                if r.get("creditDebit") == "DEBIT" and r.get("transactionCode")  == "553"
+            ]
+            debit_records = [
+                (r.get("additionalData2"), r.get("amount"), r.get("balance"))
+                for r in records
+                if r.get("creditDebit") == "DEBIT" and r.get("transactionCode") != "553"
+            ]
+            send_email_alert("✅ CREDIT", f"🚨 Found successful transactions: {credit_records} \n"
+                                         f"found debit transactions: {debit_records}\n"
+                                         f"and totally commission transactions: {sum(debit_commission_records)}")
+            if os.path.exists(day_file_path):
+                with open(day_file_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            else:
+                data = []
+
             # Merge both lists
             records += data
             ids = [r.get("transactionId") for r in records if "transactionId" in r]
@@ -50,8 +77,8 @@ def main():
         else:
             print("⚠️ No records found, skipping save.")
 
-        print("\n⏰ Waiting 1 hour before next fetch...\n")
-        time.sleep(3600)
+        print("\n⏰ Waiting 6 hour before next fetch...\n")
+        time.sleep(21600)
 
 
 if __name__ == "__main__":
