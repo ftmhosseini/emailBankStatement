@@ -5,13 +5,76 @@ from information import *
 import requests
 import smtplib
 from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
+from email import encoders
 
 SNAPSHOT_FILE = "last_24h_snapshot.json"
 DATA_FILE = "data.json"
-IGNORE_FIELDS = {"branchName", "transactionDescription"}
-def clean_record(r):
-    return {k: v for k, v in r.items() if k not in IGNORE_FIELDS}
+# IGNORE_FIELDS = {"transactionId", "transactionDescription"}
+# def clean_record(r):
+#     return {k: v for k, v in r.items() if k not in IGNORE_FIELDS}
+
+def convert_ids_to_string(record):
+    if 'transactionId' in record:
+        record['transactionId'] = str(record['transactionId'])
+    # Repeat for any nested records or different ID keys if necessary
+    return record
+
+def send_email_file_attached(subject):
+    sender_email = os.environ.get("EMAIL_ADDRESS")
+    sender_password = os.environ.get("EMAIL_PASSWORD")  # use app password, not your Gmail password
+    msg = MIMEMultipart()
+    msg["From"] = os.environ.get("EMAIL_ADDRESS")
+    msg["To"] = os.environ.get("DESTINATION_EMAIL")
+    msg["Subject"] = subject
+    body = "Duplicate transaction IDs found"
+    msg.attach(MIMEText(body, 'plain'))
+    try:
+        with open(SNAPSHOT_FILE, "rb") as attachment:
+            # Create a MIMEBase object for the attachment
+            part = MIMEBase('application', 'octet-stream')
+            part.set_payload(attachment.read())
+
+        # **CRITICAL MISSING STEP: Encode the file data**
+        encoders.encode_base64(part)
+
+        # Add the header with the file name
+        part.add_header(
+            "Content-Disposition",
+            f"attachment; filename= {os.path.basename(SNAPSHOT_FILE)}",
+        )
+        msg.attach(part)
+
+    except FileNotFoundError:
+        print(f"⚠️ Warning: Attachment file not found at {SNAPSHOT_FILE}. Sending email without file.")
+    except Exception as e:
+        print(f"🛑 Error attaching file: {e}. Sending email without file.")
+
+        # --- 4. Send the Email (CRITICAL MISSING STEP) ---
+    try:
+        # Connect to the SMTP server using TLS encryption
+        with smtplib.SMTP("smtp.gmail.com", 465) as server:
+            server.ehlo()  # Can be omitted
+            server.starttls()  # Puts the connection in TLS/STARTTLS mode
+            server.ehlo()  # Can be omitted
+
+            # Log in to the server
+            server.login(sender_email, sender_password)
+
+            # Send the message
+            server.sendmail(sender_email, os.environ.get('DESTINATION_EMAIL'), msg.as_string())
+
+        print(f"✅ Email with attachment '{os.path.basename(SNAPSHOT_FILE)}' sent successfully to {os.environ.get('DESTINATION_EMAIL')}")
+
+    except Exception as e:
+        print(f"❌ Failed to send email via SMTP: {e}")
+
+    # --- Example of how you would call this function ---
+    # send_email_file_attached(
+    #     subject="Duplication Alert Snapshot",
+    #     body="Review the attached JSON file for the last 24-hour transaction snapshot."
+    # )
 
 def send_email_alert(subject, body):
     sender_email = os.environ.get("EMAIL_ADDRESS")
@@ -39,9 +102,9 @@ def send_email_alert(subject, body):
     # except Exception as e:
     #     print(f"❌ Failed to send email: {e}")
 
-def get_token(username, password):
+def get_token():
     """Request OAuth2 access token using user credentials."""
-    credentials = f"{username}:{password}"
+    credentials = f"{os.environ.get('username')}:{os.environ.get('password')}"
     base64_credentials = base64.b64encode(credentials.encode()).decode()
 
     headers = {
@@ -69,34 +132,54 @@ def get_token(username, password):
 
 
 def get_24h_statement():
-    permission = False
+
     now = datetime.now(timezone.utc)
-    from_time = (now - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    from_time = (now - timedelta(hours=72)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
     to_time = now.strftime("%Y-%m-%dT%H:%M:%S.999Z")
     all_records = get_all_statements(from_time, to_time)
     records = all_records.copy()
     with open(SNAPSHOT_FILE, "r", encoding="utf-8") as f:
         data = json.load(f)
 
-        if len(data) == 0:
-            permission = True
-        else:
-            records = [clean_record(r) for r in records if r not in data]
-            data = [clean_record(d) for d in data if d.get("transactionDateTime") >= from_time and d not in all_records]
+        if len(data) != 0:
+            # clean_record(d)
+            records = [r for r in records if r not in data]
 
-            if len(data) == 0:
-                permission = True
-            else:
-                send_email_alert('deleting {len(data)} from previous statement', f" data is {data}")
-    if permission:
-        with open(SNAPSHOT_FILE, "w", encoding="utf-8") as f:
-            json.dump(all_records, f, indent=2, ensure_ascii=False)
-    return records
+            deleted_data = []
+            changeable_keys = ['rowNumber' , 'hyperLinkType', 'categoryId']
+            for d in data:
+                temp_deleted_data = {}  # collect deleted fields for this record
+
+                orig = next((r for r in all_records
+                             if r.get("transactionId") == d.get("transactionId")), None)
+
+                if orig is None:
+                    continue  # didn't exist before → skip
+
+                for k, v in d.items():
+                    if k not in changeable_keys:
+                        if orig.get(k) != v:  # compare to original value
+                            if k == 'transactionId' and v > 0:
+                                temp_deleted_data[k] = v
+
+                if temp_deleted_data:
+                    deleted_data.append(temp_deleted_data)
+
+            # data = [d for d in data if d.get("transactionDateTime") >= from_time and d not in all_records]
+            #
+            # deleted_data = [d for d in data if d.get('transactionId') > 0]
+            if len(deleted_data) != 0:
+                send_email_alert(f'deleting {len(deleted_data)} from previous statement form {from_time}', f" data is {deleted_data}")
+
+    with open(SNAPSHOT_FILE, "w", encoding="utf-8") as f:
+        json.dump(all_records, f, indent=2, ensure_ascii=False)
+    return [records, data]
 
 
 
 def get_all_statements(from_time, to_time, limit = 100):
     all_records = []
+    records_count = 0
     page = 1
 
     while True:
@@ -118,25 +201,35 @@ def get_all_statements(from_time, to_time, limit = 100):
         }
 
         response = requests.post(os.environ.get("STATEMENT_URL"), headers=headers, data=json.dumps(body))
+        max_retries = 1  # Initial attempt + one retry
+        attempt = 0
+        while attempt < max_retries:
+            if response.status_code != 200:
+                if not get_token():
+                    response = requests.post(os.environ.get("STATEMENT_URL"), headers=headers, data=json.dumps(body))
+            attempt += 1
         if response.status_code != 200:
             print("❌ Request failed:", response.status_code, response.text)
+            get_token()
             break
-
+        response.encoding = 'utf-8'
         data = response.json()
         # assume your API response contains a list of transactions inside "records"
         # Support both array or nested dict formats
         if isinstance(data, list):
+            # records = [convert_ids_to_string(record) for record in data]
             records = data
         else:
             records = data.get("response", {}).get("accountStatementResponse", [])
             records_count = data.get("response", {}).get("outputRecordCount", 0)
-            limit = records_count
+
             ids = set(item.get("transactionId") for item in records)
             if not len(ids) == len(records):
                 send_email_alert("⚠️Repeated transactions","this data has repeated transactions")
 
             for record in records:
                 if record not in all_records:
+                    # all_records.append(convert_ids_to_string(record))
                     all_records.append(record)
 
         if not records:
@@ -146,9 +239,10 @@ def get_all_statements(from_time, to_time, limit = 100):
         print(f"📦 Page {page}: got {len(records)} records.")
 
         # if less than limit returned → that was the last page
-        if len(records) < limit:
+        if records_count <= limit:
             break
         else:
+            limit = records_count + 1
             print(f"❌ Page {page}: got {len(records)} records. please check!!")
 
         page += 1
