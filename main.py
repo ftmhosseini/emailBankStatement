@@ -45,7 +45,7 @@ def main():
                         if abs(curr["balance"] - nxt["balance"]) not in (abs(curr["amount"]), abs(nxt["amount"])):
                             send_email_alert(
                                 f"❌ Transaction {curr.get('transactionId')}",
-                                f"🚨 This transaction doesn't change the balance properly"
+                                f"🚨 This transaction doesn't change the balance properly ${records}"
                             )
 
                 credit_records = [

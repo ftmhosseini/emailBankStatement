@@ -11,9 +11,6 @@ from email import encoders
 
 SNAPSHOT_FILE = "last_24h_snapshot.json"
 DATA_FILE = "data.json"
-# IGNORE_FIELDS = {"transactionId", "transactionDescription"}
-# def clean_record(r):
-#     return {k: v for k, v in r.items() if k not in IGNORE_FIELDS}
 
 def convert_ids_to_string(record):
     if 'transactionId' in record:
@@ -54,28 +51,16 @@ def send_email_file_attached(subject):
         # --- 4. Send the Email (CRITICAL MISSING STEP) ---
     try:
         # Connect to the SMTP server using TLS encryption
-        with smtplib.SMTP("smtp.gmail.com", 465) as server:
-            server.ehlo()  # Can be omitted
-            server.starttls()  # Puts the connection in TLS/STARTTLS mode
-            server.ehlo()  # Can be omitted
-
-            # Log in to the server
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
             server.login(sender_email, sender_password)
-
-            # Send the message
-            server.sendmail(sender_email, os.environ.get('DESTINATION_EMAIL'), msg.as_string())
+            server.send_message(msg)
 
         print(f"✅ Email with attachment '{os.path.basename(SNAPSHOT_FILE)}' sent successfully to {os.environ.get('DESTINATION_EMAIL')}")
 
     except Exception as e:
         print(f"❌ Failed to send email via SMTP: {e}")
 
-    # --- Example of how you would call this function ---
-    # send_email_file_attached(
-    #     subject="Duplication Alert Snapshot",
-    #     body="Review the attached JSON file for the last 24-hour transaction snapshot."
-    # )
-
+        
 def send_email_alert(subject, body):
     sender_email = os.environ.get("EMAIL_ADDRESS")
     sender_password = os.environ.get("EMAIL_PASSWORD")  # use app password, not your Gmail password
@@ -93,14 +78,6 @@ def send_email_alert(subject, body):
     except Exception as e:
         print(f"❌ Failed to send email: {e}")
 
-    # try:
-    #     with smtplib.SMTP("smtp.gmail.com", 587) as server:
-    #         server.starttls()  # Enable encryption
-    #         server.login(sender_email, sender_password)
-    #         server.send_message(msg)
-    #     print(f"✅ Email sent to {os.environ.get('DESTINATION_EMAIL')}")
-    # except Exception as e:
-    #     print(f"❌ Failed to send email: {e}")
 
 def get_token():
     """Request OAuth2 access token using user credentials."""
@@ -170,6 +147,7 @@ def get_24h_statement():
             # deleted_data = [d for d in data if d.get('transactionId') > 0]
             if len(deleted_data) != 0:
                 send_email_alert(f'deleting {len(deleted_data)} from previous statement form {from_time}', f" data is {deleted_data}")
+                send_email_file_attached("deleted data")
 
     with open(SNAPSHOT_FILE, "w", encoding="utf-8") as f:
         json.dump(all_records, f, indent=2, ensure_ascii=False)
@@ -201,17 +179,12 @@ def get_all_statements(from_time, to_time, limit = 100):
         }
 
         response = requests.post(os.environ.get("STATEMENT_URL"), headers=headers, data=json.dumps(body))
-        max_retries = 1  # Initial attempt + one retry
-        attempt = 0
-        while attempt < max_retries:
-            if response.status_code != 200:
-                if not get_token():
-                    response = requests.post(os.environ.get("STATEMENT_URL"), headers=headers, data=json.dumps(body))
-            attempt += 1
-        if response.status_code != 200:
-            print("❌ Request failed:", response.status_code, response.text)
-            get_token()
-            break
+        if response.status_code == 401 and response.json().get("error", {}).get("code") == 'AUTHENTICATION_EXCEPTION':
+            token = get_token()
+            if not token:
+                return None
+            response = requests.post(os.environ.get("STATEMENT_URL"), headers=headers, data=json.dumps(body))
+
         response.encoding = 'utf-8'
         data = response.json()
         # assume your API response contains a list of transactions inside "records"
