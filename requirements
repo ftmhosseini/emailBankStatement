@@ -1,0 +1,9 @@
+in Mac
+python3 -m pip install python-dotenv
+pip install python-dotenv
+pip install boto3
+
+
+in Windows
+
+pip3 install python-dotenv boto3

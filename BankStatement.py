@@ -1,82 +1,10 @@
+from datetime import datetime, timedelta, timezone
+from SendEmail import *
+import requests
 import base64
 import json
-from datetime import datetime, timedelta, timezone
-from information import *
-import requests
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.base import MIMEBase
-from email.mime.multipart import MIMEMultipart
-from email import encoders
-
-SNAPSHOT_FILE = "last_24h_snapshot.json"
-DATA_FILE = "data.json"
-
-def convert_ids_to_string(record):
-    if 'transactionId' in record:
-        record['transactionId'] = str(record['transactionId'])
-    # Repeat for any nested records or different ID keys if necessary
-    return record
-
-def send_email_file_attached(subject):
-    sender_email = os.environ.get("EMAIL_ADDRESS")
-    sender_password = os.environ.get("EMAIL_PASSWORD")  # use app password, not your Gmail password
-    msg = MIMEMultipart()
-    msg["From"] = os.environ.get("EMAIL_ADDRESS")
-    msg["To"] = os.environ.get("DESTINATION_EMAIL")
-    msg["Subject"] = subject
-    body = "Duplicate transaction IDs found"
-    msg.attach(MIMEText(body, 'plain'))
-    try:
-        with open(SNAPSHOT_FILE, "rb") as attachment:
-            # Create a MIMEBase object for the attachment
-            part = MIMEBase('application', 'octet-stream')
-            part.set_payload(attachment.read())
-
-        # **CRITICAL MISSING STEP: Encode the file data**
-        encoders.encode_base64(part)
-
-        # Add the header with the file name
-        part.add_header(
-            "Content-Disposition",
-            f"attachment; filename= {os.path.basename(SNAPSHOT_FILE)}",
-        )
-        msg.attach(part)
-
-    except FileNotFoundError:
-        print(f"⚠️ Warning: Attachment file not found at {SNAPSHOT_FILE}. Sending email without file.")
-    except Exception as e:
-        print(f"🛑 Error attaching file: {e}. Sending email without file.")
-
-        # --- 4. Send the Email (CRITICAL MISSING STEP) ---
-    try:
-        # Connect to the SMTP server using TLS encryption
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(sender_email, sender_password)
-            server.send_message(msg)
-
-        print(f"✅ Email with attachment '{os.path.basename(SNAPSHOT_FILE)}' sent successfully to {os.environ.get('DESTINATION_EMAIL')}")
-
-    except Exception as e:
-        print(f"❌ Failed to send email via SMTP: {e}")
-
-        
-def send_email_alert(subject, body):
-    sender_email = os.environ.get("EMAIL_ADDRESS")
-    sender_password = os.environ.get("EMAIL_PASSWORD")  # use app password, not your Gmail password
-
-    msg = MIMEMultipart()
-    msg["From"] = os.environ.get("EMAIL_ADDRESS")
-    msg["To"] = os.environ.get("DESTINATION_EMAIL")
-    msg["Subject"] = subject
-    msg.attach(MIMEText(body, "plain"))
-    try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(sender_email, sender_password)
-            server.send_message(msg)
-        print(f"✅ Email sent to {os.environ.get('DESTINATION_EMAIL')}")
-    except Exception as e:
-        print(f"❌ Failed to send email: {e}")
+from dotenv import load_dotenv
+load_dotenv()
 
 
 def get_token():
@@ -97,7 +25,7 @@ def get_token():
 
     print("\n🔐 Getting access token...")
     response = requests.post(os.environ.get("TOKEN_URL"), headers=headers, data=data)
-
+    # email_back_up("getting access token", response.json())
     if response.status_code == 200:
         os.environ["TOKEN"] = response.json().get("access_token")
         print("✅ Access token retrieved successfully.")
@@ -113,6 +41,86 @@ def get_24h_statement():
     now = datetime.now(timezone.utc)
     from_time = (now - timedelta(hours=72)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
     to_time = now.strftime("%Y-%m-%dT%H:%M:%S.999Z")
+    limit = 1000
+    def get_all_statements(from_time, to_time):
+        global response
+        nonlocal limit
+        all_records = []
+        records_count = 0
+        page = 1
+
+        while True:
+            try:
+                headers = {
+                    "Authorization": f"Bearer {os.environ.get('TOKEN')}",
+                    "Content-Type": "application/json",
+                    "Cookie": os.environ.get("STATEMENT_COOKIE")
+                }
+
+                body = {
+                    "offsetNumber": page,
+                    "offsetLength": limit,
+                    "accountNumber": os.environ.get("ACCOUNT_NUMBER"),
+                    "dateTimeRange": {
+                        "fromDateTime": from_time,
+                        "toDateTime": to_time
+                    },
+                    "languageType": "FARSI"
+                }
+
+                response = requests.post(os.environ.get("STATEMENT_URL"), headers=headers, data=json.dumps(body))
+                email_back_up("getting records", response.json())
+
+                if response.status_code == 401 and response.json().get("error", {}).get(
+                        "code") == 'AUTHENTICATION_EXCEPTION':
+                    token = get_token()
+                    if not token:
+                        return None
+                    response = requests.post(os.environ.get("STATEMENT_URL"), headers=headers, data=json.dumps(body))
+
+                response.encoding = 'utf-8'
+                data = response.json()
+                send_aws_sqs(data)
+                # assume your API response contains a list of transactions inside "records"
+                # Support both array or nested dict formats
+                if isinstance(data, list):
+                    # records = [convert_ids_to_string(record) for record in data]
+                    records = data
+                else:
+                    records = data.get("response", {}).get("accountStatementResponse", [])
+                    records_count = data.get("response", {}).get("outputRecordCount", 0)
+
+                    ids = set(item.get("transactionId") for item in records)
+                    if not len(ids) == len(records):
+                        send_email_alert("⚠️Repeated transactions", "this data has repeated transactions")
+
+                    for record in records:
+                        if record not in all_records:
+                            # all_records.append(convert_ids_to_string(record))
+                            all_records.append(record)
+
+                if not records:
+                    print(f"✅ All {len(all_records)} records fetched.")
+                    break
+
+                print(f"📦 Page {page}: got {len(records)} records.")
+
+                # if less than limit returned → that was the last page
+                if records_count <= limit:
+                    break
+                else:
+                    limit = records_count + 1
+                    print(f"❌ Page {page}: got {len(records)} records. please check!!")
+
+                page += 1
+            except Exception as e:
+                if response.status_code == 401 and response.json().get("error", {}).get(
+                        "code") == 'AUTHENTICATION_EXCEPTION':
+                    get_token()
+                email_back_up("getting error", str(e))
+
+        return all_records
+
     all_records = get_all_statements(from_time, to_time)
     records = all_records.copy()
     with open(SNAPSHOT_FILE, "r", encoding="utf-8") as f:
@@ -142,9 +150,6 @@ def get_24h_statement():
                 if temp_deleted_data:
                     deleted_data.append(temp_deleted_data)
 
-            # data = [d for d in data if d.get("transactionDateTime") >= from_time and d not in all_records]
-            #
-            # deleted_data = [d for d in data if d.get('transactionId') > 0]
             if len(deleted_data) != 0:
                 send_email_alert(f'deleting {len(deleted_data)} from previous statement form {from_time}', f" data is {deleted_data}")
                 send_email_file_attached("deleted data")
@@ -155,70 +160,72 @@ def get_24h_statement():
 
 
 
-def get_all_statements(from_time, to_time, limit = 100):
-    all_records = []
-    records_count = 0
-    page = 1
-
-    while True:
-        headers = {
-            "Authorization": f"Bearer {os.environ.get('TOKEN')}",
-            "Content-Type": "application/json",
-            "Cookie": os.environ.get("STATEMENT_COOKIE")
-        }
-
-        body = {
-            "offsetNumber": page,
-            "offsetLength": limit,
-            "accountNumber": os.environ.get("ACCOUNT_NUMBER"),
-            "dateTimeRange": {
-                "fromDateTime": from_time,
-                "toDateTime": to_time
-            },
-            "languageType": "FARSI"
-        }
-
-        response = requests.post(os.environ.get("STATEMENT_URL"), headers=headers, data=json.dumps(body))
-        if response.status_code == 401 and response.json().get("error", {}).get("code") == 'AUTHENTICATION_EXCEPTION':
-            token = get_token()
-            if not token:
-                return None
-            response = requests.post(os.environ.get("STATEMENT_URL"), headers=headers, data=json.dumps(body))
-
-        response.encoding = 'utf-8'
-        data = response.json()
-        # assume your API response contains a list of transactions inside "records"
-        # Support both array or nested dict formats
-        if isinstance(data, list):
-            # records = [convert_ids_to_string(record) for record in data]
-            records = data
-        else:
-            records = data.get("response", {}).get("accountStatementResponse", [])
-            records_count = data.get("response", {}).get("outputRecordCount", 0)
-
-            ids = set(item.get("transactionId") for item in records)
-            if not len(ids) == len(records):
-                send_email_alert("⚠️Repeated transactions","this data has repeated transactions")
-
-            for record in records:
-                if record not in all_records:
-                    # all_records.append(convert_ids_to_string(record))
-                    all_records.append(record)
-
-        if not records:
-            print(f"✅ All {len(all_records)} records fetched.")
-            break
-
-        print(f"📦 Page {page}: got {len(records)} records.")
-
-        # if less than limit returned → that was the last page
-        if records_count <= limit:
-            break
-        else:
-            limit = records_count + 1
-            print(f"❌ Page {page}: got {len(records)} records. please check!!")
-
-        page += 1
-
-    return all_records
+# def get_all_statements(from_time, to_time, limit = 1000):
+#     all_records = []
+#     records_count = 0
+#     page = 1
+#
+#     while True:
+#         headers = {
+#             "Authorization": f"Bearer {os.environ.get('TOKEN')}",
+#             "Content-Type": "application/json",
+#             "Cookie": os.environ.get("STATEMENT_COOKIE")
+#         }
+#
+#         body = {
+#             "offsetNumber": page,
+#             "offsetLength": limit,
+#             "accountNumber": os.environ.get("ACCOUNT_NUMBER"),
+#             "dateTimeRange": {
+#                 "fromDateTime": from_time,
+#                 "toDateTime": to_time
+#             },
+#             "languageType": "FARSI"
+#         }
+#
+#         response = requests.post(os.environ.get("STATEMENT_URL"), headers=headers, data=json.dumps(body))
+#         email_back_up("getting records", response.json())
+#
+#         if response.status_code == 401 and response.json().get("error", {}).get("code") == 'AUTHENTICATION_EXCEPTION':
+#             token = get_token()
+#             if not token:
+#                 return None
+#             response = requests.post(os.environ.get("STATEMENT_URL"), headers=headers, data=json.dumps(body))
+#
+#         response.encoding = 'utf-8'
+#         data = response.json()
+#         # assume your API response contains a list of transactions inside "records"
+#         # Support both array or nested dict formats
+#         if isinstance(data, list):
+#             # records = [convert_ids_to_string(record) for record in data]
+#             records = data
+#         else:
+#             records = data.get("response", {}).get("accountStatementResponse", [])
+#             records_count = data.get("response", {}).get("outputRecordCount", 0)
+#
+#             ids = set(item.get("transactionId") for item in records)
+#             if not len(ids) == len(records):
+#                 send_email_alert("⚠️Repeated transactions","this data has repeated transactions")
+#
+#             for record in records:
+#                 if record not in all_records:
+#                     # all_records.append(convert_ids_to_string(record))
+#                     all_records.append(record)
+#
+#         if not records:
+#             print(f"✅ All {len(all_records)} records fetched.")
+#             break
+#
+#         print(f"📦 Page {page}: got {len(records)} records.")
+#
+#         # if less than limit returned → that was the last page
+#         if records_count <= limit:
+#             break
+#         else:
+#             limit = records_count + 1
+#             print(f"❌ Page {page}: got {len(records)} records. please check!!")
+#
+#         page += 1
+#
+#     return all_records
 
