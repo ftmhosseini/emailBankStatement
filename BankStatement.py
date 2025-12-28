@@ -3,7 +3,7 @@ from SendEmail import *
 import requests
 import base64
 import json
-from dotenv import load_dotenv
+from dotenv import load_dotenv, set_key
 load_dotenv()
 
 
@@ -27,7 +27,9 @@ def get_token():
     response = requests.post(os.environ.get("TOKEN_URL"), headers=headers, data=data)
     # email_back_up("getting access token", response.json())
     if response.status_code == 200:
-        os.environ["TOKEN"] = response.json().get("access_token")
+        # os.environ["TOKEN"] = response.json().get("access_token")
+        set_key(".env", "TOKEN", response.json().get("access_token"))
+        load_dotenv(override=True)
         print("✅ Access token retrieved successfully.")
         return os.environ["TOKEN"]
     else:
