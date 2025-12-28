@@ -1,0 +1,5 @@
+.idea
+.DS_Store
+__pycache__/BankStatement.cpython-313.pyc
+__pycache__/SendEmail.cpython-313.pyc
+__pycache__/information.cpython-313.pyc
