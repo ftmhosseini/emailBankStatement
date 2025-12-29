@@ -5,8 +5,10 @@ from SendEmail import *
 from collections import Counter
 import time
 
-DATA_FETCH_INTERVAL = timedelta(hours=6)
-
+# every 6 hours
+# DATA_FETCH_INTERVAL = timedelta(hours=6)
+# every one hour
+DATA_FETCH_INTERVAL = timedelta(hours=1)
 def main():
 
     last_data_fetch = datetime.min.replace(tzinfo=timezone.utc)
@@ -139,7 +141,7 @@ def main():
         except Exception as e:
             email_back_up("error occurs", str(e))
         finally:
-            time.sleep(21600)
+            time.sleep(DATA_FETCH_INTERVAL.total_seconds())
 
 
 

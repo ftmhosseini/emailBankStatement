@@ -41,7 +41,10 @@ def get_token():
 def get_24h_statement():
 
     now = datetime.now(timezone.utc)
-    from_time = (now - timedelta(hours=72)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    # 3 days = 72 hours
+    # from_time = (now - timedelta(hours=72)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    # 1.5 days = 36 hours
+    from_time = (now - timedelta(hours=36)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
     to_time = now.strftime("%Y-%m-%dT%H:%M:%S.999Z")
     limit = 1000
     def get_all_statements(from_time, to_time):
